@@ -2,14 +2,13 @@
 pragma solidity ^0.8.13;
 
 import "forge-std/Test.sol";
-import "../src/Counter.sol";
+import "../src/TLC.sol";
 
-contract CounterTest is Test {
-    Counter public counter;
+contract TLCTest is Test {
+    TLC public tlc;
 
     function setUp() public {
-        counter = new Counter();
-        counter.setNumber(0);
+        tlc = new TLC();
     }
 
     function testIncrement() public {
