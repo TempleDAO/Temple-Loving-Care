@@ -3,15 +3,15 @@ pragma solidity ^0.8.13;
 
 import "forge-std/Test.sol";
 import {ERC20Mock} from "openzeppelin-contracts/mocks/ERC20Mock.sol";
-import "../src/TLC.sol";
+import "../src/TempleLineOfCredit.sol";
 import "../src/common/access/Operators.sol";
 
-contract TLCTest is Test {
+contract TempleLineOfCreditTest is Test {
 
-    TLC public tlc;
+    TempleLineOfCredit public tlc;
 
-    uint256 public interestRate;
-    uint256 public collateralizationRatio;
+    uint256 public interestRateBps;
+    uint256 public minCollateralizationRatio;
     uint256 public interestRatePeriod;
 
     ERC20Mock public collateralToken;
@@ -19,8 +19,6 @@ contract TLCTest is Test {
 
     ERC20Mock public debtToken;
     uint256 public debtPrice;
-
-    uint256 public liquidationFee;
 
     address admin = address(0x1);
     address alice = address(0x2);
@@ -30,24 +28,22 @@ contract TLCTest is Test {
 
     function setUp() public {
 
-        interestRate = 50; // 5%
-        collateralizationRatio = 120;
-        interestRatePeriod = 1 hours;
+        interestRateBps = 500; // 5%
+        minCollateralizationRatio = 120;
+        interestRatePeriod = 60 seconds;
         collateralToken = new ERC20Mock("TempleToken", "Temple", admin, uint(500_000e18));
         collateralPrice = 970; // 0.97
         debtToken = new ERC20Mock("DAI Token", "DAI", admin, uint(500_000e18));
         debtPrice = 1000; // 1 USD
-        liquidationFee = 10; 
 
-        tlc = new TLC(
-            interestRate,
-            collateralizationRatio,
+        tlc = new TempleLineOfCredit(
+            interestRateBps,
+            minCollateralizationRatio,
             interestRatePeriod,
             address(collateralToken),
             collateralPrice,
             address(debtToken),
             debtPrice,
-            liquidationFee,
             debtCollector
         );
 
@@ -55,11 +51,11 @@ contract TLCTest is Test {
     }
 
     function testInitalization() public {
-        assertEq(tlc.interestRate(), interestRate);
-        assertEq(tlc.collateralizationRatio(), collateralizationRatio);
-        assertEq(tlc.collateralAddress(), address(collateralToken));
+        assertEq(tlc.interestRateBps(), interestRateBps);
+        assertEq(tlc.minCollateralizationRatio(), minCollateralizationRatio);
+        assertEq(address(tlc.collateralToken()), address(collateralToken));
         assertEq(tlc.collateralPrice(), collateralPrice);
-        assertEq(tlc.debtAddress(), address(debtToken));
+        assertEq(address(tlc.debtToken()), address(debtToken));
         assertEq(tlc.debtPrice(), debtPrice);
     }
 
@@ -80,14 +76,14 @@ contract TLCTest is Test {
 
     function testDepositDebtExpectRevertOnlyOperator() public {
         vm.expectRevert(abi.encodeWithSelector(Operators.OnlyOperators.selector, address(this)));
-        tlc.depositDebt(uint(100_000e18));
+        tlc.depositDebt(alice, uint(100_000e18));
     }
 
     function testdepositDebt() public {
         vm.startPrank(admin);
         uint256 depositAmount = uint256(100_000e18);
         debtToken.approve(address(tlc), depositAmount);
-        tlc.depositDebt(depositAmount);
+        tlc.depositDebt(admin, depositAmount);
 
         assertEq(debtToken.balanceOf(address(tlc)), depositAmount);
         assertEq(tlc.debtBalance(), depositAmount);
@@ -96,13 +92,13 @@ contract TLCTest is Test {
     function _initDeposit(uint256 depositAmount) internal {
         vm.startPrank(admin);
         debtToken.approve(address(tlc), depositAmount);
-        tlc.depositDebt(depositAmount);
+        tlc.depositDebt(admin, depositAmount);
         vm.stopPrank();
     }
 
     function testPostCollateralZeroBalanceRevert() external {
         _initDeposit(uint256(100_000e18));
-        vm.expectRevert(abi.encodeWithSelector(TLC.ZeroBalance.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.InvalidAmount.selector, uint(0)));
         vm.prank(alice);
         uint256 collateralAmount = uint(0);
         tlc.postCollateral(collateralAmount);
@@ -118,7 +114,6 @@ contract TLCTest is Test {
         vm.stopPrank();
 
         assertEq(collateralToken.balanceOf(address(tlc)), collateralAmount);
-        assertEq(tlc.collateralBalance(), collateralAmount);
     }
 
     function _postCollateral(address user, uint256 collateralAmount) internal {
@@ -142,7 +137,7 @@ contract TLCTest is Test {
         _postCollateral(alice, collateralAmount);
         uint256 maxBorrowCapacity = tlc.maxBorrowCapacity(alice);
         uint256 borrowAmount = maxBorrowCapacity + uint(1);
-        vm.expectRevert(abi.encodeWithSelector(TLC.InsufficentCollateral.selector, maxBorrowCapacity, borrowAmount));
+        vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.InsufficentCollateral.selector, maxBorrowCapacity, borrowAmount));
         vm.prank(alice);
         tlc.borrow(borrowAmount);
     }
@@ -179,7 +174,7 @@ contract TLCTest is Test {
         vm.warp(block.timestamp +  (periodElapsed * interestRatePeriod));
         uint256 periodsPerYear = 365 days / interestRatePeriod;
         uint256 periodsElapsed = (block.timestamp / interestRatePeriod) - (borrowTimeStamp / interestRatePeriod);
-        uint256 expectedTotalDebt = (borrowAmount) +  ((borrowAmount * interestRate) / 10000 / periodsPerYear) * periodsElapsed;
+        uint256 expectedTotalDebt = (borrowAmount) +  ((borrowAmount * interestRateBps) / 10000 / periodsPerYear) * periodsElapsed;
 
         vm.startPrank(alice);
         assertEq(expectedTotalDebt, tlc.getTotalDebtAmount(alice));
@@ -191,7 +186,7 @@ contract TLCTest is Test {
         uint256 borrowAmount = uint(60_000e18);
         uint256 repayAmount = uint(0);
         _borrow(alice, uint(100_000e18), borrowAmount);
-         vm.expectRevert(abi.encodeWithSelector(TLC.ZeroBalance.selector, alice));
+         vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.InvalidAmount.selector, repayAmount));
         vm.startPrank(alice);
         tlc.repay(0);
         vm.stopPrank();
@@ -201,7 +196,7 @@ contract TLCTest is Test {
         uint256 borrowAmount = uint(60_000e18);
         uint256 repayAmount = uint(61_000e18);
         _borrow(alice, uint(100_000e18), borrowAmount);
-         vm.expectRevert(abi.encodeWithSelector(TLC.ExceededBorrowedAmount.selector, alice, borrowAmount, repayAmount));
+         vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.ExceededBorrowedAmount.selector, alice, borrowAmount, repayAmount));
         vm.startPrank(alice);
         tlc.repay(repayAmount);
         vm.stopPrank();
@@ -216,7 +211,7 @@ contract TLCTest is Test {
         vm.startPrank(alice);
         debtToken.approve(address(tlc), repayAmount);
         tlc.repay(repayAmount);
-        (uint256 aliceCollateralAmount, uint256 aliceDebtAmount, uint256 aliceCreatedAt) = tlc.positions(alice);
+        (, uint256 aliceDebtAmount, uint256 aliceCreatedAt) = tlc.positions(alice);
         vm.stopPrank();
 
         assertEq(borrowAmount - repayAmount,  aliceDebtAmount);
@@ -229,7 +224,7 @@ contract TLCTest is Test {
         uint256 collateralAmount = uint(100_000e18);
         uint256 withdrawalAmount = uint(100_001e18);
         _borrow(alice, collateralAmount, borrowAmount);
-         vm.expectRevert(abi.encodeWithSelector(TLC.ExceededCollateralAmonut.selector, alice, collateralAmount, withdrawalAmount));
+         vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.ExceededCollateralAmonut.selector, alice, collateralAmount, withdrawalAmount));
 
          vm.startPrank(alice);
          tlc.withdrawCollateral(withdrawalAmount);
@@ -241,7 +236,7 @@ contract TLCTest is Test {
         uint256 collateralAmount = uint(100_000e18);
         uint256 withdrawalAmount = uint(30_001e18);
         _borrow(alice, collateralAmount, borrowAmount);
-         vm.expectRevert(abi.encodeWithSelector(TLC.WillUnderCollaterlize.selector, alice, withdrawalAmount));
+         vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.WillUnderCollaterlize.selector, alice, withdrawalAmount));
 
          vm.startPrank(alice);
          tlc.withdrawCollateral(withdrawalAmount);
@@ -254,15 +249,15 @@ contract TLCTest is Test {
         uint256 withdrawalAmount = uint(10_000e18);
         _borrow(alice, collateralAmount, borrowAmount);
 
-        uint256 collateralBalanceBefore = tlc.collateralBalance();
+        uint256 collateralBalanceBefore = collateralToken.balanceOf(address(tlc));
         uint256 aliceCollateralBalanceBefore = collateralToken.balanceOf(alice);
 
          vm.startPrank(alice);
          tlc.withdrawCollateral(withdrawalAmount);
-         (uint256 aliceCollateralAmount, uint256 aliceDebtAmount, uint256 aliceCreatedAt) = tlc.positions(alice);
+         (uint256 aliceCollateralAmount,,) = tlc.positions(alice);
          vm.stopPrank();
 
-         assertEq(collateralBalanceBefore - withdrawalAmount, tlc.collateralBalance());
+         assertEq(collateralBalanceBefore - withdrawalAmount, collateralToken.balanceOf(address(tlc)));
          assertEq(aliceCollateralAmount, collateralAmount - withdrawalAmount);
          assertEq(collateralToken.balanceOf(alice), aliceCollateralBalanceBefore + withdrawalAmount);
     }
@@ -272,7 +267,7 @@ contract TLCTest is Test {
         uint256 borrowAmount = uint(70_000e18);
         uint256 collateralAmount = uint(100_000e18);
         _borrow(alice, collateralAmount, borrowAmount);
-        vm.expectRevert(abi.encodeWithSelector(TLC.OverCollaterilized.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.OverCollaterilized.selector, alice));
 
         vm.prank(admin);
         tlc.liquidate(alice);
@@ -282,9 +277,9 @@ contract TLCTest is Test {
         uint256 borrowAmount = uint(70_000e18);
         uint256 collateralAmount = uint(100_000e18);
         _borrow(alice, collateralAmount, borrowAmount);
-        vm.warp(block.timestamp + 11500 days);
+        vm.warp(block.timestamp + 1180 days);
         uint256 totalDebt = tlc.getTotalDebtAmount(alice);
-        assertTrue(tlc.getCurrentCollaterilizationRatio(alice) < collateralizationRatio);
+        assertTrue(tlc.getCurrentCollaterilizationRatio(alice) < minCollateralizationRatio);
         vm.prank(admin);
         tlc.liquidate(alice);
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: AGPL-3.0-or-later
 pragma solidity ^0.8.13;
 
 
@@ -8,7 +8,7 @@ import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol"
 
 import {Operators} from "./common/access/Operators.sol";
 
-contract TLC is Ownable, Operators {
+contract TempleLineOfCredit is Ownable, Operators {
 
     using SafeERC20 for IERC20;
 
@@ -20,57 +20,47 @@ contract TLC is Ownable, Operators {
 
     // Collateral Parameters
 
-    /// Supported collateral token address
-    address public collateralAddress;
+    /// @notice Supported collateral token address
+    IERC20 public immutable collateralToken;
 
-    /// Collateral token price 
+    /// @notice Collateral token price
     uint256 public collateralPrice;
 
-    /// Requited collateral backing to not be in bad debt
-    uint256 public collateralizationRatio;
+    /// @notice Requited collateral backing to not be in bad debt in percentage
+    uint256 public minCollateralizationRatio;
 
-    /// Total collateral posted
-    uint256 public collateralBalance;
-
-    //// Total debt taken out
+    /// @notice Total debt taken out
     uint256 public debtBalance;
 
-    /// Fixed interest rate
-    uint256 public interestRate;
+    /// @notice Fixed borrow interest rate in bpds
+    uint256 public immutable interestRateBps;
 
-    /// Amount in seconds for interest to accumulate
-    uint256 public interestRatePeriod;
+    /// @notice Amount in seconds for interest to accumulate
+    uint256 public immutable interestRatePeriod;
 
-    /// Fee for taking out a loan
-    uint256 public originationFee;
-
-    /// Fee charged for debtor liquidation
-    uint256 public liquidationFee;
-
-    /// Address to send bad debt collateral
+    /// @notice Address to send bad debt collateral
     address public debtCollector;
 
     /// Debt parameters
 
-    /// Debt token address
-    address public debtAddress;
+    /// @notice Debt token address
+    IERC20 public immutable debtToken;
 
-    /// Debt token price
+    /// @notice Debt token price
     uint256 public debtPrice;
-
     
-    /// Mapping of user positions
+    /// @notice Mapping of user positions
     mapping(address => Position) public positions;
 
     event DepositDebt(uint256 amount);
     event RemoveDebt(uint256 amount);
-    event PostCollateral(uint256 amount);
+    event PostCollateral(address account, uint256 amount);
     event Borrow(address account, uint256 amount);
     event Repay(address account, uint256 amount);
     event Withdraw(address account, uint256 amount);
     event Liquidated(address account, uint256 debtAmount, uint256 collateralSeized);
 
-    error ZeroBalance(address account);
+    error InvalidAmount(uint256 amount);
     error InsufficentCollateral(uint256 maxCapacity, uint256 debtAmount);
     error ExceededBorrowedAmount(address account, uint256 amountBorrowed, uint256 amountRepay);
     error ExceededCollateralAmonut(address account, uint256 amountCollateral, uint256 collateralWithdraw);
@@ -78,30 +68,28 @@ contract TLC is Ownable, Operators {
     error OverCollaterilized(address account);
     
     constructor(
-        uint256 _interestRate,
-        uint256 _collateralizationRatio,
+        uint256 _interestRateBps,
+        uint256 _minCollateralizationRatio,
         uint256 _interestRatePeriod,
 
-        address _collateralAddress,
+        address _collateralToken,
         uint256 _collateralPrice,
 
-        address _debtAddress,
+        address _debtToken,
         uint256 _debtPrice,
-        uint256 _liquidationFee,
         address _debtCollector
 
     ) {
-        interestRate = _interestRate;
-        collateralizationRatio = _collateralizationRatio;
+        interestRateBps = _interestRateBps;
+        minCollateralizationRatio = _minCollateralizationRatio;
         interestRatePeriod = _interestRatePeriod;
         
-        collateralAddress = _collateralAddress;
+        collateralToken = IERC20(_collateralToken);
         collateralPrice = _collateralPrice;
 
-        debtAddress = _debtAddress;
+        debtToken = IERC20(_debtToken);
         debtPrice = _debtPrice;
         
-        liquidationFee = _liquidationFee;
         debtCollector = _debtCollector;
     }
 
@@ -114,12 +102,28 @@ contract TLC is Ownable, Operators {
         _removeOperator(_address);
     }
 
+    function setDebtPrice(uint256 _debtPrice) external onlyOperators {
+        debtPrice = _debtPrice;
+    }
+
+    function setCollateralPrice(uint256 _collateralPrice) external onlyOperators {
+        collateralPrice = _collateralPrice;
+    }
+
+    function setDebtCollector(address _debtCollector) external onlyOperators {
+        debtCollector = _debtCollector;
+    }
+
+    function setCollateralizationRatio(uint256 _minCollateralizationRatio) external onlyOperators {
+        minCollateralizationRatio = _minCollateralizationRatio;
+    }
+
     /**
      * @dev Get user principal amount
      * @return principal amount
      */
-    function getDebtAmount() public view returns (uint256) {
-        return positions[msg.sender].debtAmount;
+    function getDebtAmount(address account) public view returns (uint256) {
+        return positions[account].debtAmount;
     }
 
     /**
@@ -127,10 +131,10 @@ contract TLC is Ownable, Operators {
      * @return total Debt
      */
     function getTotalDebtAmount(address account) public view returns (uint256) {
-        uint totalDebt = positions[account].debtAmount;
+        uint256 totalDebt = positions[account].debtAmount;
         uint256 periodsPerYear = 365 days / interestRatePeriod;
-        uint256 periodsElapsed = (block.timestamp / interestRatePeriod) - (positions[account].createdAt / interestRatePeriod);
-        totalDebt += ((totalDebt * interestRate) / 10000 / periodsPerYear) * periodsElapsed;
+        uint256 periodsElapsed = block.timestamp - positions[account].createdAt; // divided by interestRatePeriod
+        totalDebt += (((totalDebt * interestRateBps) / 10000 / periodsPerYear) * periodsElapsed) / interestRatePeriod;
         return totalDebt;
     }
 
@@ -138,14 +142,13 @@ contract TLC is Ownable, Operators {
      * @dev Allows operator to depoist debt tokens
      * @param amount is the amount to deposit
      */
-    function depositDebt(uint256 amount) external onlyOperators{
-        require(amount > 0, "Amount is zero !!");
+    function depositDebt(address account, uint256 amount) external onlyOperators{
         if (amount == 0) {
-            revert ZeroBalance(msg.sender);
+            revert InvalidAmount(amount);
         }
         debtBalance += amount;
-        IERC20(debtAddress).safeTransferFrom(
-            msg.sender,
+        debtToken.safeTransferFrom(
+            account,
             address(this),
             amount
         );
@@ -157,12 +160,11 @@ contract TLC is Ownable, Operators {
      * @param amount is the amount to remove
      */
     function removeDebt(uint256 amount) external onlyOperators{
-        require(amount > 0, "Amount is zero !!");
         if (amount == 0) {
-            revert ZeroBalance(msg.sender);
+            revert InvalidAmount(amount);
         }
         debtBalance -= amount;
-        IERC20(debtAddress).safeTransfer(
+        debtToken.safeTransfer(
             msg.sender,
             amount
         );
@@ -174,67 +176,74 @@ contract TLC is Ownable, Operators {
      * @param amount is the amount to deposit
      */
     function postCollateral(uint256 amount) external {
-        if (amount == 0) revert ZeroBalance(msg.sender);
+        if (amount == 0) revert InvalidAmount(amount);
         positions[msg.sender].collateralAmount += amount;
-        collateralBalance += amount;
-        IERC20(collateralAddress).safeTransferFrom(
+        collateralToken.safeTransferFrom(
             msg.sender,
             address(this),
             amount
         );
+        emit PostCollateral(msg.sender, amount);
     }
 
     function borrow(uint256 amount) external {
-        if (positions[msg.sender].debtAmount != 0) {
-            positions[msg.sender].debtAmount = getTotalDebtAmount(msg.sender);
+        if (amount == 0) revert InvalidAmount(amount);
+
+        uint256 debtAmount =  positions[msg.sender].debtAmount;
+        if (debtAmount != 0) {
+            debtAmount = getTotalDebtAmount(msg.sender);
         }
 
-        uint256 maxBorrowCapacity = maxBorrowCapacity(msg.sender);
-        maxBorrowCapacity -= positions[msg.sender].debtAmount;
+        uint256 borrowCapacity = _maxBorrowCapacity(positions[msg.sender].collateralAmount) - debtAmount;
+        debtAmount += amount;
 
-        // TODO: Add fees for borrowing
-        positions[msg.sender].debtAmount += amount;
-
-        if (positions[msg.sender].debtAmount > maxBorrowCapacity) {
-            revert InsufficentCollateral(maxBorrowCapacity, positions[msg.sender].debtAmount);
+        if (debtAmount > borrowCapacity) {
+            revert InsufficentCollateral(borrowCapacity, debtAmount);
         }
+
+        positions[msg.sender].debtAmount = debtAmount;
         
         // If more than 1 interest rate period has passed update the start-time
-        if (block.timestamp - positions[msg.sender].createdAt > interestRatePeriod || positions[msg.sender].createdAt == 0 ) {
+        if (block.timestamp - positions[msg.sender].createdAt >= interestRatePeriod || positions[msg.sender].createdAt == 0 ) {
             positions[msg.sender].createdAt = block.timestamp;
         }
          
         debtBalance -= amount;
-        IERC20(debtAddress).safeTransfer(
+        debtToken.safeTransfer(
             msg.sender,
             amount
         );
         emit Borrow(msg.sender, amount);
     }
 
-    function maxBorrowCapacity(address account) public returns(uint256) {
-        return ((positions[account].collateralAmount * collateralPrice * 100) / debtPrice / collateralizationRatio);
+    function maxBorrowCapacity(address account) public view returns(uint256) {
+        return ((positions[account].collateralAmount * collateralPrice * 100) / debtPrice / minCollateralizationRatio);
     }
 
 
+    function _maxBorrowCapacity(uint256 collateralAmount) internal view returns (uint256) {
+        return collateralAmount * collateralPrice * 100 / debtPrice / minCollateralizationRatio;
+    }
 
    /**
      * @dev Allows borrower to with draw collateral if sufficient to not default on loan
      * @param withdrawalAmount is the amount to withdraw
      */
     function withdrawCollateral(uint256 withdrawalAmount) external {
-        if (withdrawalAmount > positions[msg.sender].collateralAmount) {
-            revert ExceededCollateralAmonut(msg.sender, positions[msg.sender].collateralAmount, withdrawalAmount);
+
+        uint256 collateralAmount = positions[msg.sender].collateralAmount;
+        if (withdrawalAmount > collateralAmount) {
+            revert ExceededCollateralAmonut(msg.sender, collateralAmount, withdrawalAmount);
         }
 
-        uint256 maxBorrowCapacity = (((positions[msg.sender].collateralAmount - withdrawalAmount) * collateralPrice * 100) / debtPrice / collateralizationRatio);
-        if (positions[msg.sender].debtAmount > maxBorrowCapacity ) {
+        uint256 borrowCapacity = _maxBorrowCapacity(collateralAmount - withdrawalAmount);
+        
+        if (positions[msg.sender].debtAmount > borrowCapacity ) {
             revert WillUnderCollaterlize(msg.sender, withdrawalAmount);
         }
 
         positions[msg.sender].collateralAmount -= withdrawalAmount;
-        collateralBalance -= withdrawalAmount;
-        IERC20(collateralAddress).safeTransfer(
+        collateralToken.safeTransfer(
             msg.sender,
             withdrawalAmount
         );
@@ -247,7 +256,7 @@ contract TLC is Ownable, Operators {
      * @param repayAmount is the amount to repay
      */
     function repay(uint256 repayAmount) external {
-        if (repayAmount == 0) revert ZeroBalance(msg.sender);
+        if (repayAmount == 0) revert InvalidAmount(repayAmount);
         positions[msg.sender].debtAmount = getTotalDebtAmount(msg.sender);
 
         if (repayAmount >  positions[msg.sender].debtAmount) {
@@ -256,10 +265,12 @@ contract TLC is Ownable, Operators {
 
         positions[msg.sender].debtAmount -= repayAmount;
         debtBalance += repayAmount;
-
-        uint256 periodsElapsed = (block.timestamp / interestRatePeriod) - (positions[msg.sender].createdAt / interestRatePeriod);
-        positions[msg.sender].createdAt += periodsElapsed * interestRatePeriod;
-        IERC20(debtAddress).safeTransferFrom(
+        
+        // If more than 1 interest rate period has passed update the start-time
+        if (block.timestamp - positions[msg.sender].createdAt >= interestRatePeriod || positions[msg.sender].createdAt == 0  ) {
+            positions[msg.sender].createdAt = block.timestamp;
+        }
+        debtToken.safeTransferFrom(
             msg.sender,
             address(this),
             repayAmount 
@@ -273,12 +284,11 @@ contract TLC is Ownable, Operators {
      */
     function liquidate(address debtor) external onlyOperators {
 
-        if (getCurrentCollaterilizationRatio(debtor) >= collateralizationRatio) {
+        if (getCurrentCollaterilizationRatio(debtor) >= minCollateralizationRatio) {
             revert OverCollaterilized(debtor);
         }
 
         uint256 totalDebtOwed = getTotalDebtAmount(debtor);
-        // TODO: Add liquidation fee
         uint256 collateralSeized = (totalDebtOwed * debtPrice) / collateralPrice;
 
         if (collateralSeized > positions[debtor].collateralAmount) {
@@ -288,7 +298,7 @@ contract TLC is Ownable, Operators {
         positions[debtor].collateralAmount -= collateralSeized;
         positions[debtor].debtAmount = 0;
         positions[debtor].createdAt = 0;
-        IERC20(collateralAddress).safeTransfer(
+        collateralToken.safeTransfer(
             debtCollector,
             collateralSeized 
         );
