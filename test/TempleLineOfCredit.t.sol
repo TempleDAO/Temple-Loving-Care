@@ -202,7 +202,7 @@ contract TempleLineOfCreditTest is Test {
         vm.stopPrank();
     }
 
-    function testRepaySuccess() external {
+    function testRepaySuccess(uint256 repayAmount) external {
         uint256 borrowAmount = uint(60_000e18);
         uint256 repayAmount = uint(50_000e18);
         _borrow(alice, uint(100_000e18), borrowAmount);

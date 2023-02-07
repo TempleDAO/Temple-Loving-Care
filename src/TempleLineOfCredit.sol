@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.17;
 
 
 import {Ownable} from "openzeppelin-contracts/access/Ownable.sol";
@@ -26,7 +26,7 @@ contract TempleLineOfCredit is Ownable, Operators {
     /// @notice Collateral token price
     uint256 public collateralPrice;
 
-    /// @notice Requited collateral backing to not be in bad debt in percentage
+    /// @notice Required collateral backing to not be in bad debt in percentage
     uint256 public minCollateralizationRatio;
 
     /// @notice Total debt taken out
@@ -217,7 +217,7 @@ contract TempleLineOfCredit is Ownable, Operators {
     }
 
     function maxBorrowCapacity(address account) public view returns(uint256) {
-        return ((positions[account].collateralAmount * collateralPrice * 100) / debtPrice / minCollateralizationRatio);
+        return  _maxBorrowCapacity(positions[account].collateralAmount);
     }
 
 
@@ -230,7 +230,7 @@ contract TempleLineOfCredit is Ownable, Operators {
      * @param withdrawalAmount is the amount to withdraw
      */
     function withdrawCollateral(uint256 withdrawalAmount) external {
-
+        if (withdrawalAmount == 0) revert InvalidAmount(withdrawalAmount);
         uint256 collateralAmount = positions[msg.sender].collateralAmount;
         if (withdrawalAmount > collateralAmount) {
             revert ExceededCollateralAmonut(msg.sender, collateralAmount, withdrawalAmount);
@@ -283,35 +283,40 @@ contract TempleLineOfCredit is Ownable, Operators {
      * @param debtor the account to liquidate
      */
     function liquidate(address debtor) external onlyOperators {
+        Position storage position = positions[debtor];    
+        uint256 totalDebtOwed = getTotalDebtAmount(debtor);
 
-        if (getCurrentCollaterilizationRatio(debtor) >= minCollateralizationRatio) {
+        if (_getCurrentCollaterilizationRatio(position.collateralAmount, position.debtAmount, totalDebtOwed) >= minCollateralizationRatio) {
             revert OverCollaterilized(debtor);
         }
 
-        uint256 totalDebtOwed = getTotalDebtAmount(debtor);
         uint256 collateralSeized = (totalDebtOwed * debtPrice) / collateralPrice;
 
-        if (collateralSeized > positions[debtor].collateralAmount) {
-            collateralSeized = positions[debtor].collateralAmount;
+        if (collateralSeized > position.collateralAmount) {
+            collateralSeized = position.collateralAmount;
         }
 
-        positions[debtor].collateralAmount -= collateralSeized;
-        positions[debtor].debtAmount = 0;
-        positions[debtor].createdAt = 0;
+        position.collateralAmount -= collateralSeized;
+        position.debtAmount = 0;
+        position.createdAt = 0;
+
         collateralToken.safeTransfer(
             debtCollector,
             collateralSeized 
         );
 
         emit Liquidated(debtor, totalDebtOwed, collateralSeized);
-
     }
 
     function getCurrentCollaterilizationRatio(address account) public view returns(uint256) {
-        if (positions[account].debtAmount == 0) {
+        _getCurrentCollaterilizationRatio(positions[account].collateralAmount, positions[account].debtAmount, getTotalDebtAmount(account));
+    }
+
+    function _getCurrentCollaterilizationRatio(uint256 collateralAmount, uint256 debtAmount, uint256 totalDebtAmount) public view returns(uint256) {
+        if (debtAmount == 0 ) {
             return 0;
         } else {
-            return ((positions[account].collateralAmount * collateralPrice * 100) / getTotalDebtAmount(account) / debtPrice);
+            return ((collateralAmount * collateralPrice * 100) / totalDebtAmount / debtPrice);
         }
     }
 
