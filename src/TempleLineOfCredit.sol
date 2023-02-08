@@ -32,7 +32,7 @@ contract TempleLineOfCredit is Ownable, Operators {
     /// @notice Total debt taken out
     uint256 public debtBalance;
 
-    /// @notice Fixed borrow interest rate in bpds
+    /// @notice Fixed borrow interest rate in bps
     uint256 public immutable interestRateBps;
 
     /// @notice Address to send bad debt collateral
