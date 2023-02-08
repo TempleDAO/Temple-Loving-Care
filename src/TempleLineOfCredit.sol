@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.17;
 
 
 import {Ownable} from "openzeppelin-contracts/access/Ownable.sol";
@@ -26,7 +26,7 @@ contract TempleLineOfCredit is Ownable, Operators {
     /// @notice Collateral token price
     uint256 public collateralPrice;
 
-    /// @notice Requited collateral backing to not be in bad debt in percentage
+    /// @notice Required collateral backing to not be in bad debt in percentage with 100 decimal precision
     uint256 public minCollateralizationRatio;
 
     /// @notice Total debt taken out
@@ -34,9 +34,6 @@ contract TempleLineOfCredit is Ownable, Operators {
 
     /// @notice Fixed borrow interest rate in bpds
     uint256 public immutable interestRateBps;
-
-    /// @notice Amount in seconds for interest to accumulate
-    uint256 public immutable interestRatePeriod;
 
     /// @notice Address to send bad debt collateral
     address public debtCollector;
@@ -62,6 +59,7 @@ contract TempleLineOfCredit is Ownable, Operators {
 
     error InvalidAmount(uint256 amount);
     error InsufficentCollateral(uint256 maxCapacity, uint256 debtAmount);
+    error InsufficentDebtToken(uint256 debtTokenBalance, uint256 borrowAmount);
     error ExceededBorrowedAmount(address account, uint256 amountBorrowed, uint256 amountRepay);
     error ExceededCollateralAmonut(address account, uint256 amountCollateral, uint256 collateralWithdraw);
     error WillUnderCollaterlize(address account, uint256 withdrawalAmount);
@@ -70,7 +68,6 @@ contract TempleLineOfCredit is Ownable, Operators {
     constructor(
         uint256 _interestRateBps,
         uint256 _minCollateralizationRatio,
-        uint256 _interestRatePeriod,
 
         address _collateralToken,
         uint256 _collateralPrice,
@@ -82,7 +79,6 @@ contract TempleLineOfCredit is Ownable, Operators {
     ) {
         interestRateBps = _interestRateBps;
         minCollateralizationRatio = _minCollateralizationRatio;
-        interestRatePeriod = _interestRatePeriod;
         
         collateralToken = IERC20(_collateralToken);
         collateralPrice = _collateralPrice;
@@ -132,9 +128,8 @@ contract TempleLineOfCredit is Ownable, Operators {
      */
     function getTotalDebtAmount(address account) public view returns (uint256) {
         uint256 totalDebt = positions[account].debtAmount;
-        uint256 periodsPerYear = 365 days / interestRatePeriod;
-        uint256 periodsElapsed = block.timestamp - positions[account].createdAt; // divided by interestRatePeriod
-        totalDebt += (((totalDebt * interestRateBps) / 10000 / periodsPerYear) * periodsElapsed) / interestRatePeriod;
+        uint256 secondsElapsed = block.timestamp - positions[account].createdAt; 
+        totalDebt += (totalDebt * interestRateBps * secondsElapsed)  / 10000 / 365 days;
         return totalDebt;
     }
 
@@ -186,43 +181,42 @@ contract TempleLineOfCredit is Ownable, Operators {
         emit PostCollateral(msg.sender, amount);
     }
 
-    function borrow(uint256 amount) external {
-        if (amount == 0) revert InvalidAmount(amount);
+    function borrow(uint256 borrowAmount) external {
+        if (borrowAmount == 0) revert InvalidAmount(borrowAmount);
 
         uint256 debtAmount =  positions[msg.sender].debtAmount;
+        if (borrowAmount > debtBalance) {
+            revert InsufficentDebtToken(debtBalance, borrowAmount);
+        }
         if (debtAmount != 0) {
             debtAmount = getTotalDebtAmount(msg.sender);
         }
 
         uint256 borrowCapacity = _maxBorrowCapacity(positions[msg.sender].collateralAmount) - debtAmount;
-        debtAmount += amount;
+        debtAmount += borrowAmount;
 
         if (debtAmount > borrowCapacity) {
             revert InsufficentCollateral(borrowCapacity, debtAmount);
         }
 
         positions[msg.sender].debtAmount = debtAmount;
-        
-        // If more than 1 interest rate period has passed update the start-time
-        if (block.timestamp - positions[msg.sender].createdAt >= interestRatePeriod || positions[msg.sender].createdAt == 0 ) {
-            positions[msg.sender].createdAt = block.timestamp;
-        }
+        positions[msg.sender].createdAt = block.timestamp;
          
-        debtBalance -= amount;
+        debtBalance -= borrowAmount;
         debtToken.safeTransfer(
             msg.sender,
-            amount
+            borrowAmount 
         );
-        emit Borrow(msg.sender, amount);
+        emit Borrow(msg.sender, borrowAmount);
     }
 
     function maxBorrowCapacity(address account) public view returns(uint256) {
-        return ((positions[account].collateralAmount * collateralPrice * 100) / debtPrice / minCollateralizationRatio);
+        return  _maxBorrowCapacity(positions[account].collateralAmount);
     }
 
 
     function _maxBorrowCapacity(uint256 collateralAmount) internal view returns (uint256) {
-        return collateralAmount * collateralPrice * 100 / debtPrice / minCollateralizationRatio;
+        return collateralAmount * collateralPrice * 10000 / debtPrice / minCollateralizationRatio;
     }
 
    /**
@@ -230,7 +224,7 @@ contract TempleLineOfCredit is Ownable, Operators {
      * @param withdrawalAmount is the amount to withdraw
      */
     function withdrawCollateral(uint256 withdrawalAmount) external {
-
+        if (withdrawalAmount == 0) revert InvalidAmount(withdrawalAmount);
         uint256 collateralAmount = positions[msg.sender].collateralAmount;
         if (withdrawalAmount > collateralAmount) {
             revert ExceededCollateralAmonut(msg.sender, collateralAmount, withdrawalAmount);
@@ -265,11 +259,8 @@ contract TempleLineOfCredit is Ownable, Operators {
 
         positions[msg.sender].debtAmount -= repayAmount;
         debtBalance += repayAmount;
-        
-        // If more than 1 interest rate period has passed update the start-time
-        if (block.timestamp - positions[msg.sender].createdAt >= interestRatePeriod || positions[msg.sender].createdAt == 0  ) {
-            positions[msg.sender].createdAt = block.timestamp;
-        }
+        positions[msg.sender].createdAt = block.timestamp;
+
         debtToken.safeTransferFrom(
             msg.sender,
             address(this),
@@ -283,35 +274,40 @@ contract TempleLineOfCredit is Ownable, Operators {
      * @param debtor the account to liquidate
      */
     function liquidate(address debtor) external onlyOperators {
+        Position storage position = positions[debtor];    
+        uint256 totalDebtOwed = getTotalDebtAmount(debtor);
 
-        if (getCurrentCollaterilizationRatio(debtor) >= minCollateralizationRatio) {
+        if (_getCurrentCollaterilizationRatio(position.collateralAmount, position.debtAmount, totalDebtOwed) >= minCollateralizationRatio) {
             revert OverCollaterilized(debtor);
         }
 
-        uint256 totalDebtOwed = getTotalDebtAmount(debtor);
         uint256 collateralSeized = (totalDebtOwed * debtPrice) / collateralPrice;
 
-        if (collateralSeized > positions[debtor].collateralAmount) {
-            collateralSeized = positions[debtor].collateralAmount;
+        if (collateralSeized > position.collateralAmount) {
+            collateralSeized = position.collateralAmount;
         }
 
-        positions[debtor].collateralAmount -= collateralSeized;
-        positions[debtor].debtAmount = 0;
-        positions[debtor].createdAt = 0;
+        position.collateralAmount -= collateralSeized;
+        position.debtAmount = 0;
+        position.createdAt = 0;
+
         collateralToken.safeTransfer(
             debtCollector,
             collateralSeized 
         );
 
         emit Liquidated(debtor, totalDebtOwed, collateralSeized);
-
     }
 
     function getCurrentCollaterilizationRatio(address account) public view returns(uint256) {
-        if (positions[account].debtAmount == 0) {
+        _getCurrentCollaterilizationRatio(positions[account].collateralAmount, positions[account].debtAmount, getTotalDebtAmount(account));
+    }
+
+    function _getCurrentCollaterilizationRatio(uint256 collateralAmount, uint256 debtAmount, uint256 totalDebtAmount) public view returns(uint256) {
+        if (debtAmount == 0 ) {
             return 0;
         } else {
-            return ((positions[account].collateralAmount * collateralPrice * 100) / getTotalDebtAmount(account) / debtPrice);
+            return ((collateralAmount * collateralPrice * 10000) / totalDebtAmount / debtPrice);
         }
     }
 

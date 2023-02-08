@@ -12,7 +12,6 @@ contract TempleLineOfCreditTest is Test {
 
     uint256 public interestRateBps;
     uint256 public minCollateralizationRatio;
-    uint256 public interestRatePeriod;
 
     ERC20Mock public collateralToken;
     uint256 public collateralPrice;
@@ -29,8 +28,7 @@ contract TempleLineOfCreditTest is Test {
     function setUp() public {
 
         interestRateBps = 500; // 5%
-        minCollateralizationRatio = 120;
-        interestRatePeriod = 60 seconds;
+        minCollateralizationRatio = 12000; // 120 percent
         collateralToken = new ERC20Mock("TempleToken", "Temple", admin, uint(500_000e18));
         collateralPrice = 970; // 0.97
         debtToken = new ERC20Mock("DAI Token", "DAI", admin, uint(500_000e18));
@@ -39,7 +37,6 @@ contract TempleLineOfCreditTest is Test {
         tlc = new TempleLineOfCredit(
             interestRateBps,
             minCollateralizationRatio,
-            interestRatePeriod,
             address(collateralToken),
             collateralPrice,
             address(debtToken),
@@ -165,16 +162,15 @@ contract TempleLineOfCreditTest is Test {
         tlc.borrow(borrowAmount);
     }
 
-    function testBorrowAccuresInterest(uint32 periodElapsed) external {
+    function testBorrowAccuresInterest(uint32 secondsElapsed) external {
         uint256 borrowAmount = uint(60_000e18);
         _borrow(alice, uint(100_000e18), borrowAmount);
 
         uint256 borrowTimeStamp = block.timestamp;
        
-        vm.warp(block.timestamp +  (periodElapsed * interestRatePeriod));
-        uint256 periodsPerYear = 365 days / interestRatePeriod;
-        uint256 periodsElapsed = (block.timestamp / interestRatePeriod) - (borrowTimeStamp / interestRatePeriod);
-        uint256 expectedTotalDebt = (borrowAmount) +  ((borrowAmount * interestRateBps) / 10000 / periodsPerYear) * periodsElapsed;
+        vm.warp(block.timestamp +  secondsElapsed);
+        uint256 secondsElapsed = block.timestamp  - borrowTimeStamp;
+        uint256 expectedTotalDebt = (borrowAmount) +  ((borrowAmount * interestRateBps * secondsElapsed) / 10000 / 365 days);
 
         vm.startPrank(alice);
         assertEq(expectedTotalDebt, tlc.getTotalDebtAmount(alice));
@@ -202,7 +198,7 @@ contract TempleLineOfCreditTest is Test {
         vm.stopPrank();
     }
 
-    function testRepaySuccess() external {
+    function testRepaySuccess(uint256 repayAmount) external {
         uint256 borrowAmount = uint(60_000e18);
         uint256 repayAmount = uint(50_000e18);
         _borrow(alice, uint(100_000e18), borrowAmount);
