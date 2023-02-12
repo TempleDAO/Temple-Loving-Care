@@ -297,7 +297,7 @@ contract TempleLineOfCredit is Ownable, Operators {
     function _maxBorrowCapacity(uint256 collateralAmount, TokenPrice debtPrice,  uint256 minCollateralizationRatio) internal view returns (uint256) {
         (uint256 debtTokenPrice, uint256 debtPercision) = getDebtTokenPrice(debtPrice);
         (uint256 collateralTokenPrice, uint256 collateralPrecision) = getDebtTokenPrice(collateralPrice);
-        return collateralAmount * collateralTokenPrice * debtPercision * 10000 / debtTokenPrice  / collateralPrecision /minCollateralizationRatio;
+        return collateralAmount * collateralTokenPrice * debtPercision * 10000 / debtTokenPrice  / collateralPrecision / minCollateralizationRatio;
     }
 
    /**
@@ -371,7 +371,7 @@ contract TempleLineOfCredit is Ownable, Operators {
                     repayAmount 
                 );
             } else {
-                IERC20MintBurn(debtToken).mint(
+                IERC20MintBurn(debtToken).burn(
                     msg.sender,
                     repayAmount 
                 );
