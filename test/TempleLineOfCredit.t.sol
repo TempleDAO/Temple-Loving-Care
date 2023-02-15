@@ -24,6 +24,14 @@ contract TempleLineOfCreditTest is Test {
     TempleLineOfCredit.TokenType public daiTokenType;
 
 
+    ERC20Mock public oudToken;
+    TempleLineOfCredit.TokenPrice public oudPrice;
+    uint256 public oudMinCollateralizationRatio;
+    uint256 public oudInterestRateBps;
+    TempleLineOfCredit.TokenType public oudTokenType;
+
+
+
     OudRedeemer public oudRedeemer;
 
 
@@ -48,13 +56,19 @@ contract TempleLineOfCreditTest is Test {
 
         oudRedeemer = new OudRedeemer();
 
-
         tlc = new TempleLineOfCredit(
             address(collateralToken),
             collateralPrice,
             debtCollector,
             address(oudRedeemer)
         );
+
+
+        oudToken = new ERC20Mock("OUD Token", "OUD", address(tlc), uint(500_000e18));
+        oudPrice = TempleLineOfCredit.TokenPrice.TPI;
+        oudMinCollateralizationRatio = 11000; 
+        oudTokenType = TempleLineOfCredit.TokenType.MINT;
+        oudInterestRateBps = 500; // 5%
 
         tlc.addOperator(admin);
     }
@@ -129,7 +143,6 @@ contract TempleLineOfCreditTest is Test {
         tlc.removeDebtToken(address(daiToken));
     }
 
-
     function testRemoveDebtTokenSuccess() public {
         vm.prank(admin);
         tlc.addDebtToken(address(daiToken), daiTokenType, daiInterestRateBps, daiPrice, daiMinCollateralizationRatio);
@@ -160,15 +173,21 @@ contract TempleLineOfCreditTest is Test {
         assertEq(minCollateralizationRatio, newCollaterilizationRatio);
     }
 
-    function testDepositDebtExpectRevertOnlyOperator() public {
+    function testDepositExpectRevertOnlyOperator() public {
         vm.expectRevert(abi.encodeWithSelector(Operators.OnlyOperators.selector, address(this)));
-        tlc.depositDebt(address(daiToken), alice, uint(100_000e18));
+        tlc.depositReserve(address(daiToken), alice, uint(100_000e18));
     }
 
-    function testDepositDebtExpectFailUnSupprotedTokenAddress() public {
+    function testDepositReserveInvalidAmount() public {
+        vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.InvalidAmount.selector, 0));
+        vm.prank(admin);
+        tlc.depositReserve(address(daiToken), alice, 0);
+    }
+
+    function testDepositReserveExpectFailUnSupprotedTokenAddress() public {
         vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.Unsupported.selector, address(daiToken)));
         vm.prank(admin);
-        tlc.depositDebt(address(daiToken), alice, uint(100_000e18));
+        tlc.depositReserve(address(daiToken), alice, uint(100_000e18));
     }
 
     function testDepositDebtExpectFailIncorrectTokenType() public {
@@ -177,51 +196,62 @@ contract TempleLineOfCreditTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.Unsupported.selector, address(daiToken)));
         vm.prank(admin);
-        tlc.depositDebt(address(daiToken), alice, uint(100_000e18));
+        tlc.depositReserve(address(daiToken), alice, uint(100_000e18));
     }
 
-    function testdepositDebtSucess() public {
+    function testDepositDebtSucess() public {
         vm.startPrank(admin);
         tlc.addDebtToken(address(daiToken), TempleLineOfCredit.TokenType.TRANSFER, daiInterestRateBps, daiPrice, daiMinCollateralizationRatio);
         
         uint256 depositAmount = uint256(100_000e18);
         daiToken.approve(address(tlc), depositAmount);
-        tlc.depositDebt(address(daiToken), admin, depositAmount);
+        tlc.depositReserve(address(daiToken), admin, depositAmount);
         assertEq(daiToken.balanceOf(address(tlc)), depositAmount);
     }
 
-    function testRemoveDebtExpectRevertOnlyOperator() public {
-        vm.expectRevert(abi.encodeWithSelector(Operators.OnlyOperators.selector, address(this)));
-        tlc.removeDebt(address(daiToken), alice, uint(100_000e18));
+    function testRemoveDebtInvalidAmount() public {
+        vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.InvalidAmount.selector, 0));
+        vm.prank(admin);
+        tlc.removeReserve(address(daiToken), alice, 0);
     }
 
-    function testRemoveDebtExpectFailUnSupprotedTokenAddress() public {
+    function testRemoveReserveExpectRevertOnlyOperator() public {
+        vm.expectRevert(abi.encodeWithSelector(Operators.OnlyOperators.selector, address(this)));
+        tlc.removeReserve(address(daiToken), alice, uint(100_000e18));
+    }
+
+    function testRemoveReserveExpectFailUnSupprotedTokenAddress() public {
         vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.Unsupported.selector, address(daiToken)));
         vm.prank(admin);
-        tlc.removeDebt(address(daiToken), alice, uint(100_000e18));
+        tlc.removeReserve(address(daiToken), alice, uint(100_000e18));
     }
 
 
-    function testRemoveDebtSucess() public {
+    function testRemoveReserveSucess() public {
         vm.startPrank(admin);
         tlc.addDebtToken(address(daiToken), TempleLineOfCredit.TokenType.TRANSFER, daiInterestRateBps, daiPrice, daiMinCollateralizationRatio);
         
         uint256 depositAmount = uint256(100_000e18);
         daiToken.approve(address(tlc), depositAmount);
-        tlc.depositDebt(address(daiToken), admin, depositAmount);
+        tlc.depositReserve(address(daiToken), admin, depositAmount);
 
         uint256 priorDebtBalance = daiToken.balanceOf(address(tlc));
         uint256 removeAmount = uint256(55_000e18);
-        tlc.removeDebt(address(daiToken), admin, removeAmount);
+        tlc.removeReserve(address(daiToken), admin, removeAmount);
         assertEq(daiToken.balanceOf(address(tlc)), priorDebtBalance - removeAmount);
     }
 
 
-    function _initDeposit(uint256 depositAmount) internal {
+    function _initDeposit(uint256 daiDepositAmount) internal {
         vm.startPrank(admin);
+
+        // deposit DAI
         tlc.addDebtToken(address(daiToken), TempleLineOfCredit.TokenType.TRANSFER, daiInterestRateBps, daiPrice, daiMinCollateralizationRatio);
-        daiToken.approve(address(tlc), depositAmount);
-        tlc.depositDebt(address(daiToken), admin, depositAmount);
+        daiToken.approve(address(tlc), daiDepositAmount);
+        tlc.depositReserve(address(daiToken), admin, daiDepositAmount);
+
+        // support OUD
+        tlc.addDebtToken(address(oudToken), TempleLineOfCredit.TokenType.MINT, oudInterestRateBps, oudPrice, oudMinCollateralizationRatio);
         vm.stopPrank();
     }
 
@@ -258,7 +288,6 @@ contract TempleLineOfCreditTest is Test {
         uint256 collateralAmount = uint(100_000e18);
         uint256 expectedMaxBorrowCapacity = uint(97_000e18) * uint(100) / uint(120);
         _postCollateral(alice, collateralAmount);
-        console.log(expectedMaxBorrowCapacity);
         assertEq(tlc.maxBorrowCapacity(address(daiToken), alice), expectedMaxBorrowCapacity);
     }
 
@@ -278,58 +307,119 @@ contract TempleLineOfCreditTest is Test {
         tlc.borrow(debtTokens, borrowAmounts);
     }
 
-    function testBorrowPasses() external {
+
+    function testBorrowFailInvalidArrayLength() external {
+        uint256 collateralAmount = uint(100_000e18);
+        _postCollateral(alice, collateralAmount);
+        
+        vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.InvalidArrayLength.selector));
+        vm.prank(alice);
+        address[] memory debtTokens = new address[](2);
+        debtTokens[0] = address(daiToken);
+        debtTokens[1] = address(oudToken);
+        uint256[] memory borrowAmounts = new uint256[](1);
+        borrowAmounts[0] = 100_100;
+        tlc.borrow(debtTokens, borrowAmounts);
+    }
+
+    function testBorrowTwoAssetsSucess() external {
         uint256 collateralAmount = uint(100_000e18);
         _postCollateral(alice, collateralAmount);
         uint256 tlcDebtBalance = daiToken.balanceOf(address(tlc));
-        uint256 maxBorrowCapacity = tlc.maxBorrowCapacity(address(daiToken), alice);
+        uint256 maxBorrowCapacityDAI = tlc.maxBorrowCapacity(address(daiToken), alice);
+        uint256 maxBorrowCapacityOUD = tlc.maxBorrowCapacity(address(oudToken), alice);
         
         vm.prank(alice);
-        address[] memory debtTokens = new address[](1);
+        address[] memory debtTokens = new address[](2);
         debtTokens[0] = address(daiToken);
-        uint256[] memory borrowAmounts = new uint256[](1);
-        borrowAmounts[0] = maxBorrowCapacity;
+        debtTokens[1] = address(oudToken);
+        uint256[] memory borrowAmounts = new uint256[](2);
+        borrowAmounts[0] = maxBorrowCapacityDAI;
+        borrowAmounts[1] = maxBorrowCapacityOUD;
+        
         tlc.borrow(debtTokens, borrowAmounts);
 
         (uint256 aliceCollateralAmount ) = tlc.positions(alice);
-        TempleLineOfCredit.TokenPosition memory tp = tlc.getDebtAmount(address(daiToken), alice);
-
+        
+        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
         assertEq(aliceCollateralAmount, collateralAmount);
-        assertEq(tp.debtAmount, maxBorrowCapacity);
-        assertEq(tp.createdAt, block.timestamp);
-        assertEq(daiToken.balanceOf(alice), maxBorrowCapacity);
+        assertEq(tpDAI.debtAmount, maxBorrowCapacityDAI);
+        assertEq(tpDAI.lastUpdatedAt, block.timestamp);
+        assertEq(daiToken.balanceOf(alice), maxBorrowCapacityDAI);
+
+        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        assertEq(tpOUD.debtAmount, maxBorrowCapacityOUD);
+        assertEq(tpOUD.lastUpdatedAt, block.timestamp);
+        assertEq(oudToken.balanceOf(alice), maxBorrowCapacityOUD);
     }
 
-    function _borrow(address _account, uint256 collateralAmount, uint256 borrowAmount) internal {
-        _postCollateral(_account, collateralAmount);
-        vm.prank(_account);
-        address[] memory debtTokens = new address[](1);
-        debtTokens[0] = address(daiToken);
-        uint256[] memory borrowAmounts = new uint256[](1);
-        borrowAmounts[0] = borrowAmount;
-        tlc.borrow(debtTokens, borrowAmounts);
-    }
 
     function testBorrowAccuresInterest(uint32 secondsElapsed) external {
         uint256 borrowAmount = uint(60_000e18);
-        _borrow(alice, uint(100_000e18), borrowAmount);
+        _borrow(alice, uint(100_000e18), borrowAmount, borrowAmount);
 
         uint256 borrowTimeStamp = block.timestamp;
        
         vm.warp(block.timestamp +  secondsElapsed);
         uint256 secondsElapsed = block.timestamp  - borrowTimeStamp;
-        uint256 expectedTotalDebt = (borrowAmount) +  ((borrowAmount * daiInterestRateBps * secondsElapsed) / 10000 / 365 days);
+        uint256 expectedTotalDebtDAI = (borrowAmount) +  ((borrowAmount * daiInterestRateBps * secondsElapsed) / 10000 / 365 days);
+        uint256 expectedTotalDebtOUD = (borrowAmount) +  ((borrowAmount * oudInterestRateBps * secondsElapsed) / 10000 / 365 days);
+
 
         vm.startPrank(alice);
-        assertEq(expectedTotalDebt, tlc.getTotalDebtAmount(address(daiToken), alice));
+        assertEq(expectedTotalDebtDAI, tlc.getTotalDebtAmount(address(daiToken), alice));
+        assertEq(expectedTotalDebtOUD, tlc.getTotalDebtAmount(address(oudToken), alice));
         vm.stopPrank();
     }
 
+    function _borrow(address _account, uint256 collateralAmount, uint256 daiBorrowAmount, uint256 oudBorrowAmount) internal {
+        _postCollateral(_account, collateralAmount);
+        vm.prank(_account);
+        address[] memory debtTokens = new address[](2);
+        debtTokens[0] = address(daiToken);
+        debtTokens[1] = address(oudToken);
+        uint256[] memory borrowAmounts = new uint256[](2);
+        borrowAmounts[0] = daiBorrowAmount;
+        borrowAmounts[1] = oudBorrowAmount;
+        
+        tlc.borrow(debtTokens, borrowAmounts);
+    }
+
+
+    function testBorrowAlreadyBorrowedSucess() external {
+        uint256 borrowDAIAmountFirst = uint(30_000e18);
+        uint256 borrowOUDAmountFirst = uint(20_000e18);
+        
+        _borrow(alice, uint(100_000e18), borrowDAIAmountFirst, borrowOUDAmountFirst);
+        
+        uint secondsElapsed = 200 days;
+        vm.warp(block.timestamp +  secondsElapsed);
+
+        uint256 borrowDAIAmountSecond = uint(30_000e18);
+        uint256 borrowOUDAmountSecond = uint(20_000e18);
+
+        _borrow(alice, uint(100_000e18), borrowDAIAmountSecond, borrowOUDAmountSecond);
+
+
+        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+                                   /// First Principle                                  accured principle                                       second borrow amount       
+        assertEq(tpDAI.debtAmount, borrowDAIAmountFirst + ((borrowDAIAmountFirst * daiInterestRateBps * secondsElapsed)  / 10000 / 365 days) + borrowDAIAmountSecond );
+        assertEq(tpDAI.lastUpdatedAt, block.timestamp);
+        assertEq(daiToken.balanceOf(alice), borrowDAIAmountFirst + borrowDAIAmountSecond);
+
+
+
+        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+                                   /// First Principle                                  accured principle                                       second borrow amount       
+        assertEq(tpOUD.debtAmount, borrowOUDAmountFirst + ((borrowOUDAmountFirst * oudInterestRateBps * secondsElapsed)  / 10000 / 365 days) + borrowOUDAmountSecond );
+        assertEq(tpOUD.lastUpdatedAt, block.timestamp);
+        assertEq(oudToken.balanceOf(alice), borrowOUDAmountFirst + borrowOUDAmountSecond);
+    }
 
     function testRepayZero() external {
         uint256 borrowAmount = uint(60_000e18);
         uint256 repayAmount = uint(0);
-        _borrow(alice, uint(100_000e18), borrowAmount);
+        _borrow(alice, uint(100_000e18), borrowAmount, borrowAmount);
          vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.InvalidAmount.selector, repayAmount));
         vm.startPrank(alice);
         address[] memory debtTokens = new address[](1);
@@ -343,7 +433,7 @@ contract TempleLineOfCreditTest is Test {
     function testRepayExceededBorrow() external {
         uint256 borrowAmount = uint(60_000e18);
         uint256 repayAmount = uint(61_000e18);
-        _borrow(alice, uint(100_000e18), borrowAmount);
+        _borrow(alice, uint(100_000e18), borrowAmount, borrowAmount);
          vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.ExceededBorrowedAmount.selector, alice, borrowAmount, repayAmount));
         vm.startPrank(alice);
         address[] memory debtTokens = new address[](1);
@@ -354,30 +444,40 @@ contract TempleLineOfCreditTest is Test {
         vm.stopPrank();
     }
 
-    function testRepaySuccessSingleToken(uint256 repayAmount) external {
-        uint256 borrowAmount = uint(60_000e18);
-        uint256 repayAmount = uint(50_000e18);
-        _borrow(alice, uint(100_000e18), borrowAmount);
+    function testRepaySuccessMultipleTokens() external {
+        uint256 borrowDAIAmount = uint(60_000e18);
+        uint256 borrowOUDAmount = uint(60_000e18);
+        uint256 repayDAIAmount = uint(50_000e18);
+        uint256 repayOUDAmount = uint(50_000e18);
+        
+        _borrow(alice, uint(100_000e18), borrowDAIAmount, borrowOUDAmount);
 
         vm.startPrank(alice);
-        daiToken.approve(address(tlc), repayAmount);
-        address[] memory debtTokens = new address[](1);
+        daiToken.approve(address(tlc), repayDAIAmount);
+        address[] memory debtTokens = new address[](2);
         debtTokens[0] = address(daiToken);
-        uint256[] memory repayAmounts = new uint256[](1);
-        repayAmounts[0] = repayAmount;
+        debtTokens[1] = address(oudToken);
+        uint256[] memory repayAmounts = new uint256[](2);
+        repayAmounts[0] = repayDAIAmount;
+        repayAmounts[1] = repayOUDAmount;
         tlc.repay(debtTokens, repayAmounts);
-        TempleLineOfCredit.TokenPosition memory tp = tlc.getDebtAmount(address(daiToken), alice);
         vm.stopPrank();
 
-        assertEq(borrowAmount - repayAmount,  tp.debtAmount);
-        assertEq(block.timestamp, tp.createdAt);
+        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+        assertEq(borrowDAIAmount - repayDAIAmount,  tpDAI.debtAmount);
+        assertEq(block.timestamp, tpDAI.lastUpdatedAt);
+
+        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        assertEq(borrowOUDAmount - repayOUDAmount, tpOUD.debtAmount);
+        assertEq(block.timestamp, tpOUD.lastUpdatedAt);
+        
     }
 
     function testWithdrawExceedCollateralAmount() external {
         uint256 borrowAmount = uint(60_000e18);
         uint256 collateralAmount = uint(100_000e18);
         uint256 withdrawalAmount = uint(100_001e18);
-        _borrow(alice, collateralAmount, borrowAmount);
+        _borrow(alice, collateralAmount, borrowAmount, borrowAmount);
          vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.ExceededCollateralAmonut.selector, alice, collateralAmount, withdrawalAmount));
 
          vm.startPrank(alice);
@@ -389,7 +489,7 @@ contract TempleLineOfCreditTest is Test {
         uint256 borrowAmount = uint(60_000e18);
         uint256 collateralAmount = uint(100_000e18);
         uint256 withdrawalAmount = uint(30_001e18);
-        _borrow(alice, collateralAmount, borrowAmount);
+        _borrow(alice, collateralAmount, borrowAmount, borrowAmount);
          vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.WillUnderCollaterlize.selector, alice, withdrawalAmount));
 
          vm.startPrank(alice);
@@ -401,7 +501,7 @@ contract TempleLineOfCreditTest is Test {
         uint256 borrowAmount = uint(60_000e18);
         uint256 collateralAmount = uint(100_000e18);
         uint256 withdrawalAmount = uint(10_000e18);
-        _borrow(alice, collateralAmount, borrowAmount);
+        _borrow(alice, collateralAmount, borrowAmount, borrowAmount);
 
         uint256 collateralBalanceBefore = collateralToken.balanceOf(address(tlc));
         uint256 aliceCollateralBalanceBefore = collateralToken.balanceOf(alice);
@@ -416,31 +516,66 @@ contract TempleLineOfCreditTest is Test {
          assertEq(collateralToken.balanceOf(alice), aliceCollateralBalanceBefore + withdrawalAmount);
     }
 
+    function testLiquidateSufficientCollateral() external {
+        uint256 collateralAmount = uint(100_000e18);
+        uint256 borrowAmount = uint(30_000e18);
+        _borrow(alice, collateralAmount, borrowAmount, borrowAmount);
 
-    // function testLiquidateSufficientCollateral() external {
-    //     uint256 borrowAmount = uint(70_000e18);
-    //     uint256 collateralAmount = uint(100_000e18);
-    //     _borrow(alice, collateralAmount, borrowAmount);
-    //     vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.OverCollaterilized.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.OverCollaterilized.selector, alice));
 
-    //     vm.prank(admin);
-    //     tlc.liquidate(alice);
-    // }
+        vm.prank(admin);
+        tlc.liquidate(alice, address(daiToken));
+    }
 
-    // function testLiquidateUnderWaterPositionSucessfully() external {
-    //     uint256 borrowAmount = uint(70_000e18);
-    //     uint256 collateralAmount = uint(100_000e18);
-    //     _borrow(alice, collateralAmount, borrowAmount);
-    //     vm.warp(block.timestamp + 1180 days);
-    //     uint256 totalDebt = tlc.getTotalDebtAmount(alice);
-    //     assertTrue(tlc.getCurrentCollaterilizationRatio(alice) < minCollateralizationRatio);
-    //     vm.prank(admin);
-    //     tlc.liquidate(alice);
+    function testLiquidateUnderWaterPositionSucessfully() external {
+        uint256 collateralAmount = uint(100_000e18);
+        uint256 borrowDAIAmount = uint(70_000e18);
+        uint256 borrowOUDAmount = uint(30_000e18);
+        _borrow(alice, collateralAmount, borrowDAIAmount, borrowOUDAmount);
+        vm.warp(block.timestamp + 1800 days);
+        
+        uint256 totalDebt = tlc.getTotalDebtAmount(address(daiToken), alice);
+        assertTrue(tlc.getCurrentCollaterilizationRatio(address(daiToken), alice) < daiMinCollateralizationRatio); // Position in bad debt
+        assertFalse(tlc.getCurrentCollaterilizationRatio(address(oudToken), alice) < oudMinCollateralizationRatio); // Position in good debt
+        vm.prank(admin);
+        tlc.liquidate(alice, address(daiToken));
 
-    //     (uint256 aliceCollateralAmount, uint256 aliceDebtAmount, uint256 aliceCreatedAt) = tlc.positions(alice);
-    //     assertEq(uint256(0), aliceDebtAmount);
-    //     assertEq(collateralAmount - (totalDebt * debtPrice / collateralPrice),  aliceCollateralAmount);
-    //     assertEq(uint256(0), aliceCreatedAt);
-    //     assertEq((totalDebt * debtPrice / collateralPrice), collateralToken.balanceOf(debtCollector));
-    // }
+        (uint256 aliceCollateralAmount) = tlc.positions(alice);
+        (uint256 debtTokenPrice, uint256 debtPrecision) = tlc.getTokenPrice(daiPrice);
+        (uint256 collateralTokenPrice, uint256 collateralPrecision) = tlc.getTokenPrice(collateralPrice);
+        assertEq(collateralAmount - (totalDebt * debtTokenPrice * collateralPrecision  / collateralTokenPrice / debtPrecision),  aliceCollateralAmount);
+
+        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+        assertEq(0,  tpDAI.debtAmount);
+        assertEq(block.timestamp, tpDAI.lastUpdatedAt);
+
+        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        assertEq(0, tpOUD.debtAmount);
+        assertEq(block.timestamp, tpOUD.lastUpdatedAt);
+    }
+
+    function testLiquidateUnderWaterPositionCollateralExceedAmountThatCanBeSiezedSucessfully() external {
+        uint256 collateralAmount = uint(100_000e18);
+        uint256 borrowDAIAmount = uint(70_000e18);
+        uint256 borrowOUDAmount = uint(30_000e18);
+        _borrow(alice, collateralAmount, borrowDAIAmount, borrowOUDAmount);
+        vm.warp(block.timestamp + 18000 days);
+        
+        uint256 totalDebt = tlc.getTotalDebtAmount(address(daiToken), alice);
+        assertTrue(tlc.getCurrentCollaterilizationRatio(address(daiToken), alice) < daiMinCollateralizationRatio); // Position in bad debt
+        assertTrue(tlc.getCurrentCollaterilizationRatio(address(oudToken), alice) < oudMinCollateralizationRatio); // Position in good debt
+        vm.prank(admin);
+        tlc.liquidate(alice, address(daiToken));
+
+        (uint256 aliceCollateralAmount) = tlc.positions(alice);
+        assertEq(0,  aliceCollateralAmount);
+
+        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+        assertEq(0,  tpDAI.debtAmount);
+        assertEq(block.timestamp, tpDAI.lastUpdatedAt);
+
+        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        assertEq(0, tpOUD.debtAmount);
+        assertEq(block.timestamp, tpOUD.lastUpdatedAt);
+    }
 }
