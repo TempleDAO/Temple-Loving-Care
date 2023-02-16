@@ -126,6 +126,7 @@ contract TempleLineOfCreditTest is Test {
         vm.prank(admin);
         tlc.addDebtToken(address(daiToken), daiTokenType, daiInterestRateBps, daiPrice, daiMinCollateralizationRatio);
         (TempleLineOfCredit.TokenType tokenType, uint256 interestRateBps, TempleLineOfCredit.TokenPrice tokenPrice, uint256 minCollateralizationRatio, bool allowed) = tlc.debtTokens(address(daiToken));
+        assertEq(tlc.debtTokenList(0), address(daiToken));
         assertEq(daiInterestRateBps, interestRateBps);
         assertEq(uint(daiPrice), uint(tokenPrice));
         assertEq(daiMinCollateralizationRatio, minCollateralizationRatio);
@@ -149,6 +150,7 @@ contract TempleLineOfCreditTest is Test {
         vm.prank(admin);
         tlc.removeDebtToken(address(daiToken));
         (,,,, bool allowed) = tlc.debtTokens(address(daiToken));
+        assertEq(tlc.getDebtTokenList().length, 0);
         assertEq(allowed, false);
     }
 
@@ -341,13 +343,13 @@ contract TempleLineOfCreditTest is Test {
 
         (uint256 aliceCollateralAmount ) = tlc.positions(alice);
         
-        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpDAI = tlc.getDebtPosition(address(daiToken), alice);
         assertEq(aliceCollateralAmount, collateralAmount);
         assertEq(tpDAI.debtAmount, maxBorrowCapacityDAI);
         assertEq(tpDAI.lastUpdatedAt, block.timestamp);
         assertEq(daiToken.balanceOf(alice), maxBorrowCapacityDAI);
 
-        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpOUD = tlc.getDebtPosition(address(oudToken), alice);
         assertEq(tpOUD.debtAmount, maxBorrowCapacityOUD);
         assertEq(tpOUD.lastUpdatedAt, block.timestamp);
         assertEq(oudToken.balanceOf(alice), maxBorrowCapacityOUD);
@@ -373,7 +375,9 @@ contract TempleLineOfCreditTest is Test {
     }
 
     function _borrow(address _account, uint256 collateralAmount, uint256 daiBorrowAmount, uint256 oudBorrowAmount) internal {
-        _postCollateral(_account, collateralAmount);
+        if (collateralAmount != 0) {
+            _postCollateral(_account, collateralAmount);
+        }
         vm.prank(_account);
         address[] memory debtTokens = new address[](2);
         debtTokens[0] = address(daiToken);
@@ -383,6 +387,21 @@ contract TempleLineOfCreditTest is Test {
         borrowAmounts[1] = oudBorrowAmount;
         
         tlc.borrow(debtTokens, borrowAmounts);
+    }
+
+
+    function testBorrowAlreadyBorrowedFailInsufficientCollateral() external {
+        uint256 borrowDAIAmountFirst = uint(30_000e18);
+        uint256 borrowOUDAmountFirst = uint(20_000e18);
+        
+        _borrow(alice, uint(100_000e18), borrowDAIAmountFirst, borrowOUDAmountFirst);
+
+        uint256 borrowDAIAmountSecond = tlc.maxBorrowCapacity(address(daiToken), alice) - borrowDAIAmountFirst + 1;
+        uint256 borrowOUDAmountSecond = uint(10_000e18);
+        console.log(borrowDAIAmountSecond, tlc.maxBorrowCapacity(address(daiToken), alice));
+
+        vm.expectRevert(abi.encodeWithSelector(TempleLineOfCredit.InsufficentCollateral.selector, address(daiToken), borrowDAIAmountSecond - 1,  borrowDAIAmountSecond)); 
+        _borrow(alice, 0, borrowDAIAmountSecond, borrowOUDAmountSecond);
     }
 
 
@@ -401,15 +420,13 @@ contract TempleLineOfCreditTest is Test {
         _borrow(alice, uint(100_000e18), borrowDAIAmountSecond, borrowOUDAmountSecond);
 
 
-        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpDAI = tlc.getDebtPosition(address(daiToken), alice);
                                    /// First Principle                                  accured principle                                       second borrow amount       
         assertEq(tpDAI.debtAmount, borrowDAIAmountFirst + ((borrowDAIAmountFirst * daiInterestRateBps * secondsElapsed)  / 10000 / 365 days) + borrowDAIAmountSecond );
         assertEq(tpDAI.lastUpdatedAt, block.timestamp);
         assertEq(daiToken.balanceOf(alice), borrowDAIAmountFirst + borrowDAIAmountSecond);
-
-
-
-        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        
+        TempleLineOfCredit.DebtPosition memory tpOUD = tlc.getDebtPosition(address(oudToken), alice);
                                    /// First Principle                                  accured principle                                       second borrow amount       
         assertEq(tpOUD.debtAmount, borrowOUDAmountFirst + ((borrowOUDAmountFirst * oudInterestRateBps * secondsElapsed)  / 10000 / 365 days) + borrowOUDAmountSecond );
         assertEq(tpOUD.lastUpdatedAt, block.timestamp);
@@ -463,11 +480,11 @@ contract TempleLineOfCreditTest is Test {
         tlc.repay(debtTokens, repayAmounts);
         vm.stopPrank();
 
-        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpDAI = tlc.getDebtPosition(address(daiToken), alice);
         assertEq(borrowDAIAmount - repayDAIAmount,  tpDAI.debtAmount);
         assertEq(block.timestamp, tpDAI.lastUpdatedAt);
 
-        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpOUD = tlc.getDebtPosition(address(oudToken), alice);
         assertEq(borrowOUDAmount - repayOUDAmount, tpOUD.debtAmount);
         assertEq(block.timestamp, tpOUD.lastUpdatedAt);
         
@@ -545,11 +562,11 @@ contract TempleLineOfCreditTest is Test {
         (uint256 collateralTokenPrice, uint256 collateralPrecision) = tlc.getTokenPrice(collateralPrice);
         assertEq(collateralAmount - (totalDebt * debtTokenPrice * collateralPrecision  / collateralTokenPrice / debtPrecision),  aliceCollateralAmount);
 
-        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpDAI = tlc.getDebtPosition(address(daiToken), alice);
         assertEq(0,  tpDAI.debtAmount);
         assertEq(block.timestamp, tpDAI.lastUpdatedAt);
 
-        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpOUD = tlc.getDebtPosition(address(oudToken), alice);
         assertEq(0, tpOUD.debtAmount);
         assertEq(block.timestamp, tpOUD.lastUpdatedAt);
     }
@@ -570,11 +587,11 @@ contract TempleLineOfCreditTest is Test {
         (uint256 aliceCollateralAmount) = tlc.positions(alice);
         assertEq(0,  aliceCollateralAmount);
 
-        TempleLineOfCredit.TokenPosition memory tpDAI = tlc.getDebtAmount(address(daiToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpDAI = tlc.getDebtPosition(address(daiToken), alice);
         assertEq(0,  tpDAI.debtAmount);
         assertEq(block.timestamp, tpDAI.lastUpdatedAt);
 
-        TempleLineOfCredit.TokenPosition memory tpOUD = tlc.getDebtAmount(address(oudToken), alice);
+        TempleLineOfCredit.DebtPosition memory tpOUD = tlc.getDebtPosition(address(oudToken), alice);
         assertEq(0, tpOUD.debtAmount);
         assertEq(block.timestamp, tpOUD.lastUpdatedAt);
     }
