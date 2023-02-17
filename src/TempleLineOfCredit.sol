@@ -246,7 +246,7 @@ contract TempleLineOfCredit is Ownable, Operators {
         }
         if (!debtTokens[debtToken].isAllowed || debtTokens[debtToken].tokenType != TokenType.TRANSFER ) revert Unsupported(debtToken);
         IERC20(debtToken).safeTransfer(
-            msg.sender,
+            account,
             amount
         );
         emit RemoveReserve(debtToken, amount);
@@ -473,7 +473,7 @@ contract TempleLineOfCredit is Ownable, Operators {
         return _getCurrentCollaterilizationRatio(positions[account].collateralAmount,  positions[account].debtPosition[debtToken].debtAmount, getTotalDebtAmount(debtToken, account), debtTokenPrice, debtPrecision, collateralTokenPrice, collateralPrecision);
     }
 
-    function _getCurrentCollaterilizationRatio(uint256 collateralAmount, uint256 debtAmount, uint256 totalDebtAmount, uint256 debtTokenPrice, uint256 debtPrecision, uint256 collateralTokenPrice, uint256 collateralPrecision) public view returns(uint256) {
+    function _getCurrentCollaterilizationRatio(uint256 collateralAmount, uint256 debtAmount, uint256 totalDebtAmount, uint256 debtTokenPrice, uint256 debtPrecision, uint256 collateralTokenPrice, uint256 collateralPrecision) internal view returns(uint256) {
         if (debtAmount == 0 ) {
             return 0;
         } else {
