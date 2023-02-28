@@ -94,18 +94,18 @@ contract TempleLineOfCreditV2 is ITempleLineOfCredit, Ownable, Operators {
     function setInterestRateModel(address debtToken, address interestRateModel) external onlyOperators{
 
         if (debtToken == dai.tokenAddress) {
-            _accureInterest(dai);
+            _accrueInterest(dai);
             dai.interestRateModel = interestRateModel;
         } else if (debtToken == oud.tokenAddress) {
-            _accureInterest(oud);
+            _accrueInterest(oud);
             oud.interestRateModel = interestRateModel;
         } else {
             revert Unsupported(debtToken);
         }
     }
 
-    
-    function _accureInterest(ReserveToken storage reserve) internal {
+
+    function _accrueInterest(ReserveToken storage reserve) internal {
 
         uint256 totalBorrow = reserve.totalBorrow;
         uint256 totalReserve = reserve.totalReserve;
@@ -257,7 +257,7 @@ contract TempleLineOfCreditV2 is ITempleLineOfCredit, Ownable, Operators {
 
     function _borrow(ReserveToken storage reserve, uint256 collateralAmount, uint256 borrowAmount) internal {
 
-        _accureInterest(reserve);
+        _accrueInterest(reserve);
 
         uint256 shares = reserve.shares[msg.sender];
         uint256 totalBorrowAmount = _sharesToAmount(reserve.totalShares, reserve.totalBorrow, shares);
@@ -312,7 +312,7 @@ contract TempleLineOfCreditV2 is ITempleLineOfCredit, Ownable, Operators {
 
     function _repay(ReserveToken storage reserve, uint256 repayAmount) internal {
 
-        _accureInterest(reserve);
+        _accrueInterest(reserve);
 
         uint256 shares = reserve.shares[msg.sender];
         uint256 totalBorrowAmount = _sharesToAmount(reserve.totalShares, reserve.totalBorrow, shares);
