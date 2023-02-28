@@ -8,6 +8,8 @@ import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol"
 
 import {Operators} from "./common/access/Operators.sol";
 
+import "forge-std/console.sol";
+
 interface IERC20MintBurn {
     function mint(address to, uint256 amount) external;
     function burn(address from, uint256 amount) external;
@@ -31,8 +33,12 @@ contract TempleLineOfCredit is Ownable, Operators {
 
     /// @notice debt position on a specific token
     struct DebtPosition {
-        uint256 debtAmount;
-        uint256 lastUpdatedAt;
+        /// @notice total principal borrowed
+        uint256 principalAmount;
+        /// @notice total amount from interest accured
+        uint256 interestAmount;
+        /// @notice checkpoint to last interestRateBps sum
+        uint256 interestRateAccuredStored;
     }
 
     enum TokenType {
@@ -53,6 +59,10 @@ contract TempleLineOfCredit is Ownable, Operators {
         TokenType tokenType;
         /// @notice Fixed borrow interest rate in bps
         uint256 interestRateBps;
+        /// @notice Last time interest rate was updated At
+        uint256 interestRateLastUpdatedAt;
+        /// @notice Sum of interestRateBps * dt 
+        uint256 interestRateAccuredStored;
         /// @notice debt token price
         TokenPrice tokenPrice;
         /// @notice Required collateral backing to not be in bad debt. Should have same precision as the collateral price
@@ -87,8 +97,8 @@ contract TempleLineOfCredit is Ownable, Operators {
     event SetCollateralPrice(TokenPrice price);
     event SetDebtCollector(address debtCollector); 
     event SetMinCollateralizationRatio(address debtToken, uint256 minCollateralizationRatio);
+    event SetInterestRateBps(address debtToken, uint256 interestRateBps);
     event AddDebtToken(address token);
-    event RemoveDebtToken(address token);
     event DepositReserve(address debtToken, uint256 amount);
     event RemoveReserve(address debtToken, uint256 amount);
     event PostCollateral(address account, uint256 amount);
@@ -100,6 +110,7 @@ contract TempleLineOfCredit is Ownable, Operators {
     error InvalidAmount(uint256 amount);
     error InvalidArrayLength();
     error Unsupported(address token);
+    error AlreadyExists(address token);
     error InvalidTokenPrice(TokenPrice tokenPrice);
     error InsufficentCollateral(address debtToken, uint256 maxCapacity, uint256 borrowAmount);
     error ExceededBorrowedAmount(address account, uint256 amountBorrowed, uint256 amountRepay);
@@ -122,7 +133,6 @@ contract TempleLineOfCredit is Ownable, Operators {
         oudRedeemer = _oudRedeemer;
     }
 
-
     function addOperator(address _address) external override onlyOwner {
         _addOperator(_address);
     }
@@ -142,37 +152,40 @@ contract TempleLineOfCredit is Ownable, Operators {
     }
 
     function addDebtToken(address token, TokenType tokenType, uint256 interestRateBps, TokenPrice tokenPrice, uint256 minCollateralizationRatio) external onlyOperators {
-        DebtToken memory newDebtToken = DebtToken(tokenType, interestRateBps, tokenPrice, minCollateralizationRatio, true);
+        // Revert if already exists
+        if (debtTokens[token].isAllowed) {
+            revert AlreadyExists(token);
+        }
+        DebtToken memory newDebtToken = DebtToken(tokenType, interestRateBps, block.timestamp, 0, tokenPrice, minCollateralizationRatio, true);
         debtTokens[token] = newDebtToken;
         debtTokenList.push(token);
         emit AddDebtToken(token);
     }
 
-
-    function removeDebtToken(address debtToken) external onlyOperators {
+    function setMinCollateralizationRatio(address debtToken, uint256 minCollateralizationRatio) external onlyOperators {
         if (!debtTokens[debtToken].isAllowed) revert Unsupported(debtToken);
-        delete debtTokens[debtToken];
-        uint256 debtTokensLength = debtTokenList.length;
-        for (uint256 i; i < debtTokensLength; ++i) {
-            if (debtTokenList[i] == debtToken) {
-                // Switch the last item into this place then pop off the end.
-                debtTokenList[i] = debtTokenList[debtTokenList.length - 1];
-                debtTokenList.pop();
-                break;
-            }
-        }
-        emit RemoveDebtToken(debtToken);
+        debtTokens[debtToken].minCollateralizationRatio = minCollateralizationRatio;
+        emit SetMinCollateralizationRatio(debtToken, minCollateralizationRatio);
     }
-
-    function setMinCollateralizationRatio(address debtToken, uint256 _minCollateralizationRatio) external onlyOperators {
-        if (!debtTokens[debtToken].isAllowed) revert Unsupported(debtToken);
-        debtTokens[debtToken].minCollateralizationRatio = _minCollateralizationRatio;
-        emit SetMinCollateralizationRatio(debtToken, _minCollateralizationRatio);
-    }
-
 
     /**
-     * @dev Get current user debt position. (Doesn't account for recently accured interest)
+     * @dev Get the interest rate for borrowing
+     * @param debtToken token to set interest rate for
+     * @param interestRateBps interest rate in bps
+     */
+    function setInterestRateBps(address debtToken, uint256 interestRateBps) external onlyOperators {
+        if (!debtTokens[debtToken].isAllowed) revert Unsupported(debtToken);
+         DebtToken storage debtTokenInfo = debtTokens[debtToken];
+
+         debtTokenInfo.interestRateAccuredStored = _interestRateAccured(debtTokenInfo.interestRateAccuredStored, debtTokenInfo.interestRateBps, debtTokenInfo.interestRateLastUpdatedAt);
+         debtTokenInfo.interestRateBps = interestRateBps;
+         debtTokenInfo.interestRateLastUpdatedAt = block.timestamp;
+
+         emit SetInterestRateBps(debtToken, interestRateBps);
+    }
+
+    /**
+     * @dev Get current user debt position
      * @return debt amount 
      */
     function getDebtPosition(address debtToken, address account) external view returns (DebtPosition memory) {
@@ -182,18 +195,50 @@ contract TempleLineOfCredit is Ownable, Operators {
 
     /**
      * @dev Get user total debt incurred (principal + interest)
+     * @param debtToken debt token to deposit
+     * @param account account to take debtToken from 
      * @return total Debt
      */
-    function getTotalDebtAmount(address debtToken, address account) public view returns (uint256) {
-        DebtToken storage debtTokenInfo = debtTokens[debtToken];
-        if (!debtTokenInfo.isAllowed) revert Unsupported(debtToken);
+    function getTotalDebtAmount(address debtToken, address account) public view returns(uint256) {
+         if (!debtTokens[debtToken].isAllowed) revert Unsupported(debtToken);
+         DebtToken storage debtTokenInfo = debtTokens[debtToken];
+         DebtPosition storage userPosition = positions[account].debtPosition[debtToken];
 
-        DebtPosition storage userPosition = positions[account].debtPosition[debtToken];
+         uint256 interestRateAccuredStored = _interestRateAccured(debtTokenInfo.interestRateAccuredStored, debtTokenInfo.interestRateBps, debtTokenInfo.interestRateLastUpdatedAt);
+         return _getTotalDebtAmount(userPosition.principalAmount, userPosition.interestAmount, interestRateAccuredStored, userPosition.interestRateAccuredStored);
+    }
 
-        uint256 totalDebt = userPosition.debtAmount;
-        uint256 secondsElapsed = block.timestamp - userPosition.lastUpdatedAt; 
-        totalDebt += (totalDebt * debtTokenInfo.interestRateBps * secondsElapsed)  / 10000 / 365 days;
-        return totalDebt;
+    function _getTotalDebtAmount(uint256 principleAmount, uint interestDebtAmount, uint256 interestRateAccuredStored, uint256 userinterestRateAccured) internal pure returns (uint256) {
+        return principleAmount + interestDebtAmount +  ( principleAmount * (interestRateAccuredStored - userinterestRateAccured)) / 10000 / 365 days;
+    }
+
+
+    /**
+     * @dev total interest rate accured by the system
+     * @param debtToken debt token to deposit
+     */
+    function interestRateAccured(address debtToken) public view returns(uint256) {
+         if (!debtTokens[debtToken].isAllowed) revert Unsupported(debtToken);
+         DebtToken storage debtTokenInfo = debtTokens[debtToken];
+
+         return  debtTokenInfo.interestRateAccuredStored + (debtTokenInfo.interestRateBps * (block.timestamp  - debtTokenInfo.interestRateLastUpdatedAt));
+    }
+
+    function _interestRateAccured(uint256 interestRateAccuredStored, uint256 interestRateBps, uint256 interestRateLastUpdatedAt) internal view returns(uint256) {
+        return interestRateAccuredStored + (interestRateBps * (block.timestamp  - interestRateLastUpdatedAt));
+    }
+
+
+    function _accureInterestRate(address debtToken, DebtToken storage debtTokenInfo, address account) internal  {
+         if (!debtTokenInfo.isAllowed) revert Unsupported(debtToken);
+
+         DebtPosition storage userPosition = positions[account].debtPosition[debtToken];
+
+         debtTokenInfo.interestRateAccuredStored = _interestRateAccured(debtTokenInfo.interestRateAccuredStored, debtTokenInfo.interestRateBps, debtTokenInfo.interestRateLastUpdatedAt);
+         debtTokenInfo.interestRateLastUpdatedAt = block.timestamp;
+
+         userPosition.interestAmount = (userPosition.principalAmount * (debtTokenInfo.interestRateAccuredStored - userPosition.interestRateAccuredStored)) / 10000 / 365 days;
+         userPosition.interestRateAccuredStored = debtTokenInfo.interestRateAccuredStored;
     }
 
     /**
@@ -204,9 +249,13 @@ contract TempleLineOfCredit is Ownable, Operators {
         return debtTokenList;
     }
 
-    function getTokenPrice(TokenPrice _price) public view returns (uint256 price, uint256 precision) {
+    /**
+     * @dev Get Price of a token
+     * @param price type of token
+     */
+    function getTokenPrice(TokenPrice price) public view returns (uint256 _price, uint256 _precision) {
 
-        if (_price == TokenPrice.STABLE) {
+        if (price == TokenPrice.STABLE) {
             return (10000, 10000);
         } else {
             // Get Token Price from redemeer
@@ -280,8 +329,8 @@ contract TempleLineOfCredit is Ownable, Operators {
 
         address debtToken;
         uint256 borrowAmount;
-        uint256 debtAmount;
         uint256 borrowCapacity;
+        uint256 totalDebtAmount;
         DebtToken storage debtTokenInfo;
         DebtPosition storage userPosition;
 
@@ -293,20 +342,17 @@ contract TempleLineOfCredit is Ownable, Operators {
             if (borrowAmount == 0) revert InvalidAmount(borrowAmount);
 
             debtTokenInfo = debtTokens[debtToken];
-            if (!debtTokenInfo.isAllowed) revert Unsupported(debtToken); 
+            _accureInterestRate(debtToken, debtTokenInfo, msg.sender);
 
             userPosition = positions[msg.sender].debtPosition[debtToken];
-            debtAmount = userPosition.debtAmount == 0 ? 0 : getTotalDebtAmount(debtToken, msg.sender);
-
-            
-            borrowCapacity = _maxBorrowCapacity(positions[msg.sender].collateralAmount, debtTokenInfo.tokenPrice, debtTokenInfo.minCollateralizationRatio) - debtAmount;
+            totalDebtAmount = _getTotalDebtAmount(userPosition.principalAmount, userPosition.interestAmount, debtTokenInfo.interestRateAccuredStored, userPosition.interestRateAccuredStored);
+            borrowCapacity = _maxBorrowCapacity(positions[msg.sender].collateralAmount, debtTokenInfo.tokenPrice, debtTokenInfo.minCollateralizationRatio) - totalDebtAmount;
+        
             if (borrowAmount > borrowCapacity) {
                 revert InsufficentCollateral(debtToken, borrowCapacity, borrowAmount);
             }
 
-            debtAmount += borrowAmount;
-            userPosition.debtAmount = debtAmount;
-            userPosition.lastUpdatedAt = block.timestamp;
+            userPosition.principalAmount += borrowAmount;
             
             if (debtTokenInfo.tokenType == TokenType.TRANSFER){
                 IERC20(debtToken).safeTransfer(
@@ -337,7 +383,7 @@ contract TempleLineOfCredit is Ownable, Operators {
     }
 
    /**
-     * @dev Allows borrower to with draw collateral if sufficient to not default on loan
+     * @dev Allows borrower to with draw collateral if sufficient to not default
      * @param withdrawalAmount is the amount to withdraw
      */
     function withdrawCollateral(uint256 withdrawalAmount) external {
@@ -349,16 +395,22 @@ contract TempleLineOfCredit is Ownable, Operators {
 
         address debtToken;
         DebtToken storage debtTokenInfo;
+        DebtPosition storage userPosition;
         uint256 borrowCapacity;
+        uint256 totalDebtAmount;
         uint256 debtTokensLength = debtTokenList.length;
         for (uint256 i; i < debtTokensLength; ++i) {
 
             debtToken = debtTokenList[i];
             debtTokenInfo = debtTokens[debtToken];
+            _accureInterestRate(debtToken, debtTokenInfo, msg.sender);
 
             borrowCapacity = _maxBorrowCapacity(collateralAmount - withdrawalAmount, debtTokenInfo.tokenPrice, debtTokenInfo.minCollateralizationRatio);
+
+            userPosition = positions[msg.sender].debtPosition[debtToken];
+            totalDebtAmount = _getTotalDebtAmount(userPosition.principalAmount, userPosition.interestAmount, debtTokenInfo.interestRateAccuredStored, userPosition.interestRateAccuredStored);
             
-            if (positions[msg.sender].debtPosition[debtToken].debtAmount > borrowCapacity ) {
+            if (totalDebtAmount > borrowCapacity ) {
                 revert WillUnderCollaterlize(msg.sender, withdrawalAmount);
             }
         }
@@ -381,7 +433,9 @@ contract TempleLineOfCredit is Ownable, Operators {
 
         address debtToken;
         uint256 repayAmount;
-        uint256 debtAmount;
+        uint256 totalDebtAmount;
+        uint256 principalAmount;
+        uint256 interestAmount;
         DebtToken storage debtTokenInfo;
         DebtPosition storage userPosition;
 
@@ -393,17 +447,22 @@ contract TempleLineOfCredit is Ownable, Operators {
             if (repayAmount == 0) revert InvalidAmount(repayAmount);
 
             debtTokenInfo = debtTokens[debtToken];
-            if (!debtTokenInfo.isAllowed) revert Unsupported(debtToken); 
+            _accureInterestRate(debtToken, debtTokenInfo, msg.sender);
 
             userPosition = positions[msg.sender].debtPosition[debtToken];
-            debtAmount = userPosition.debtAmount == 0 ? 0 : getTotalDebtAmount(debtToken, msg.sender);
+            totalDebtAmount = _getTotalDebtAmount(userPosition.principalAmount, userPosition.interestAmount, debtTokenInfo.interestRateAccuredStored, userPosition.interestRateAccuredStored);
 
-            if (repayAmount >  debtAmount) {
-              revert ExceededBorrowedAmount(msg.sender, debtAmount, repayAmount);
+            if (repayAmount >  totalDebtAmount) {
+              revert ExceededBorrowedAmount(msg.sender, totalDebtAmount, repayAmount);
             }
 
-            userPosition.debtAmount = debtAmount - repayAmount;
-            userPosition.lastUpdatedAt = block.timestamp;
+            principalAmount = userPosition.principalAmount;
+            interestAmount = userPosition.interestAmount;
+            
+            // Pay off principal then make interest payment
+            bool repayGreaterThanPrinciple = repayAmount > userPosition.principalAmount;
+            userPosition.principalAmount = repayGreaterThanPrinciple ?  0 : principalAmount - repayAmount;
+            userPosition.interestAmount =  repayGreaterThanPrinciple ? interestAmount - (repayAmount - principalAmount) : principalAmount;
             
             if (debtTokenInfo.tokenType == TokenType.TRANSFER){
                 IERC20(debtToken).safeTransferFrom(
@@ -430,15 +489,17 @@ contract TempleLineOfCredit is Ownable, Operators {
 
         DebtToken storage debtTokenInfo = debtTokens[debtToken];
         if (!debtTokens[debtToken].isAllowed) revert Unsupported(debtToken);
+        _accureInterestRate(debtToken, debtTokenInfo, debtor);
         
         DebtPosition storage userPosition = positions[debtor].debtPosition[debtToken];
-        uint256 totalDebtOwed = userPosition.debtAmount == 0 ? 0 : getTotalDebtAmount(debtToken, debtor);
+        
+        uint256 totalDebtOwed = _getTotalDebtAmount(userPosition.principalAmount, userPosition.interestAmount, debtTokenInfo.interestRateAccuredStored, userPosition.interestRateAccuredStored);
         uint256 collateralAmount = positions[debtor].collateralAmount;
 
         (uint256 debtTokenPrice, uint256 debtPrecision) = getTokenPrice(debtTokenInfo.tokenPrice);
         (uint256 collateralTokenPrice, uint256 collateralPrecision) = getTokenPrice(collateralPrice);
 
-        if (_getCurrentCollaterilizationRatio(collateralAmount, userPosition.debtAmount, totalDebtOwed, debtTokenPrice, debtPrecision,  collateralTokenPrice, collateralPrecision) >= debtTokenInfo.minCollateralizationRatio) {
+        if (_getCurrentCollaterilizationRatio(collateralAmount, totalDebtOwed, debtTokenPrice, debtPrecision,  collateralTokenPrice, collateralPrecision) >= debtTokenInfo.minCollateralizationRatio) {
             revert OverCollaterilized(debtor);
         }
 
@@ -455,8 +516,8 @@ contract TempleLineOfCredit is Ownable, Operators {
         for (uint256 i; i < debtTokensLength; ++i) {
             _debtToken = debtTokenList[i];
             userPosition = positions[debtor].debtPosition[_debtToken];
-            userPosition.debtAmount = 0;
-            userPosition.lastUpdatedAt = block.timestamp;
+            userPosition.principalAmount = 0;
+            userPosition.interestAmount = 0;
         }
 
         collateralToken.safeTransfer(
@@ -470,11 +531,11 @@ contract TempleLineOfCredit is Ownable, Operators {
     function getCurrentCollaterilizationRatio(address debtToken, address account) external view returns(uint256) {
         (uint256 debtTokenPrice, uint256 debtPrecision) = getTokenPrice(debtTokens[debtToken].tokenPrice);
         (uint256 collateralTokenPrice, uint256 collateralPrecision) = getTokenPrice(collateralPrice);
-        return _getCurrentCollaterilizationRatio(positions[account].collateralAmount,  positions[account].debtPosition[debtToken].debtAmount, getTotalDebtAmount(debtToken, account), debtTokenPrice, debtPrecision, collateralTokenPrice, collateralPrecision);
+        return _getCurrentCollaterilizationRatio(positions[account].collateralAmount, getTotalDebtAmount(debtToken, account), debtTokenPrice, debtPrecision, collateralTokenPrice, collateralPrecision);
     }
 
-    function _getCurrentCollaterilizationRatio(uint256 collateralAmount, uint256 debtAmount, uint256 totalDebtAmount, uint256 debtTokenPrice, uint256 debtPrecision, uint256 collateralTokenPrice, uint256 collateralPrecision) internal view returns(uint256) {
-        if (debtAmount == 0 ) {
+    function _getCurrentCollaterilizationRatio(uint256 collateralAmount, uint256 totalDebtAmount, uint256 debtTokenPrice, uint256 debtPrecision, uint256 collateralTokenPrice, uint256 collateralPrecision) internal pure returns(uint256) {
+        if (totalDebtAmount == 0 ) {
             return 0;
         } else {
 
